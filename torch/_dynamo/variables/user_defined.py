@@ -291,9 +291,22 @@ class UserDefinedClassVariable(UserDefinedVariable):
             and len(kwargs) == 0  # TODO(ybliang): support kwargs
         ):
             unwrapped_args = [x.as_python_constant() for x in args]
-            return GenericContextWrappingVariable(
-                unwrapped_args,
-                cm_obj=self.value(*unwrapped_args),
+            if self.value.__init__ == object.__init__:
+                return GenericContextWrappingVariable(
+                    unwrapped_args,
+                    cm_obj=self.value(*unwrapped_args),
+                )
+
+            try:
+                fn = variables.UserFunctionVariable(
+                    self.value.__init__, source=self.source
+                )
+            except AssertionError:
+                unimplemented("Failed to get __init__ function of %s" % self.value)
+            return tx.inline_user_function_return(
+                fn,
+                (self, *args),
+                {},
             )
         elif is_namedtuple_cls(self.value):
             fields = namedtuple_fields(self.value)
