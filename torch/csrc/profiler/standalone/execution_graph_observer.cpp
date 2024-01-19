@@ -27,7 +27,7 @@
 #include <ATen/core/stack.h>
 #include <ATen/record_function.h>
 #include <c10/util/irange.h>
-#include <torch/csrc/profiler/standalone/execution_trace_observer.h>
+#include <torch/csrc/profiler/standalone/execution_graph_observer.h>
 #include <torch/csrc/profiler/util.h>
 
 using namespace at;
@@ -43,8 +43,6 @@ template <typename T>
 inline std::string vectorToString(const std::vector<T>& v) {
   return fmt::format("[{}]", fmt::join(v, ","));
 }
-
-std::string json_str_escape(const std::string& str);
 
 constexpr size_t maxNumElements = 4096;
 
@@ -130,11 +128,10 @@ inline std::string getScalarValue(const c10::IValue& val) {
     if (str_val.size() > maxNumElements) {
       LOG(WARNING) << "string size=" << str_val.size()
                    << " exceeded maxNumElements=" << maxNumElements;
-      return fmt::format(
-          "\"{}\"", json_str_escape(str_val.substr(0, maxNumElements)));
+      return fmt::format("\"{}\"", str_val.substr(0, maxNumElements));
     }
 
-    return fmt::format("\"{}\"", json_str_escape(str_val));
+    return fmt::format("\"{}\"", str_val);
   } else if (val.isDevice()) {
     return fmt::format("\"{}\"", val.toDevice().str());
   }
@@ -150,24 +147,24 @@ inline int32_t processId() {
 }
 
 //******************************************************************************
-// Main ExecutionTraceObserver implementation.
+// Main ExecutionGraphObserver implementation.
 //******************************************************************************
 
-// ExecutionTraceObserver contains all the states of the observer. Some of them
+// ExecutionGraphObserver contains all the states of the observer. Some of them
 // are shared between the enter and exit RecordFunction call backs, some data
 // like the `op_stack` may be accessed across different threads. So we should be
 // careful about data races. A global mutex `g_mutex` is used avoid these races
 // at the cost of performance in large number of threads situations. We may
 // optimize this further to thread local, fine-grained locking, or use thread
 // safe containers.
-struct TORCH_API ExecutionTraceObserver {
+struct TORCH_API ExecutionGraphObserver {
   using ID = size_t;
 
   // Mapping of each thread to its own operator stack
   std::map<size_t, std::stack<ID>> op_stack{};
   // Uses the underlying TensorImpl object pointer as the key and map to its
   // unique id.
-  std::map<const void*, ID> object_id{};
+  std::map<void*, ID> object_id{};
   // Observer run state.
   enum class RunState { uninitialized, disabled, enabled };
 
@@ -186,7 +183,7 @@ struct TORCH_API ExecutionTraceObserver {
   int32_t pid{-1};
   std::string record_time{};
 
-  ExecutionTraceObserver() = default;
+  ExecutionGraphObserver() = default;
 
   // Returns a new unique ID.
   ID getNewID() {
@@ -211,7 +208,7 @@ struct TORCH_API ExecutionTraceObserver {
 
  private:
   static bool callbackShouldBeEnabled(RunState run_state) {
-    return run_state == ExecutionTraceObserver::RunState::enabled;
+    return run_state == ExecutionGraphObserver::RunState::enabled;
   }
 
   // Must use accessors to change this so that we can keep the
@@ -227,36 +224,36 @@ struct TORCH_API ExecutionTraceObserver {
 };
 
 // Using a singleton manager here to allow init and delete the observer object.
-using ObserverManager = GlobalStateManager<ExecutionTraceObserver>;
+using ObserverManager = GlobalStateManager<ExecutionGraphObserver>;
 
 // Uninitialized node has id = 0
-const ExecutionTraceObserver::ID uninitialized_id{0};
+const ExecutionGraphObserver::ID uninitialized_id{0};
 // Root node has id = 1
-const ExecutionTraceObserver::ID root_id{1};
+const ExecutionGraphObserver::ID root_id{1};
 
 struct FunctionCallContext : public ObserverContext {
   std::string name;
-  ExecutionTraceObserver::ID op_id{uninitialized_id};
-  ExecutionTraceObserver::ID parent_id{uninitialized_id};
-  ExecutionTraceObserver::ID fw_parent_id{uninitialized_id};
+  ExecutionGraphObserver::ID op_id{uninitialized_id};
+  ExecutionGraphObserver::ID parent_id{uninitialized_id};
+  ExecutionGraphObserver::ID fw_parent_id{uninitialized_id};
   std::vector<std::string> input_types;
   std::vector<std::string> input_shapes;
   std::vector<std::string> input_values;
 };
 
-// Opens the json file to write the execution trace.
-static std::ofstream openOutputFile(const std::string& name) {
+// Opens the json file to write the execution graph.
+std::ofstream openOutputFile(const std::string& name) {
   std::ofstream stream;
   stream.open(name, std::ofstream::out | std::ofstream::trunc);
   if (!stream) {
     LOG(ERROR) << "Failed to open '" << name << "'";
   } else {
-    VLOG(1) << "PyTorch Execution Trace: writing to " << name;
+    VLOG(1) << "Writing PyTorch execution graph to: " << name;
   }
   return stream;
 }
 
-static void writeJsonNode(
+void writeJsonNode(
     std::ofstream& out,
     const std::string& name,
     const uint64_t id,
@@ -305,7 +302,7 @@ inline std::string timeString(const std::time_t timepoint) {
   return oss.str();
 }
 
-static bool initExecutionTraceStart(ExecutionTraceObserver& ob) {
+bool initExecutionGraphStart(ExecutionGraphObserver& ob) {
   ob.out = openOutputFile(ob.file_name);
   // If somehow the output stream failed to open, finish observer here.
   if (!ob.out) {
@@ -333,11 +330,11 @@ static bool initExecutionTraceStart(ExecutionTraceObserver& ob) {
   return true;
 }
 
-// Write out Execution Trace to file
-static void finalizeExecutionTraceOutput(ExecutionTraceObserver& ob) {
+// Write out Execution Graph to file
+void finalizeExecutionGraphOutput(ExecutionGraphObserver& ob) {
   writeJsonNode(
       ob.out,
-      "[pytorch|profiler|execution_trace|process]",
+      "[pytorch|profiler|execution_graph|process]",
       root_id,
       0, // rf_id
       root_id, // parent is self
@@ -360,15 +357,15 @@ static void finalizeExecutionTraceOutput(ExecutionTraceObserver& ob) {
       timestamp);
 
   ob.out.close();
-  VLOG(1) << "PyTorch Execution Trace: written to file " << ob.file_name;
+  VLOG(1) << "PyTorch execution graph is written to file: " << ob.file_name;
 }
 
-inline ExecutionTraceObserver::ID getObjectID(
-    ExecutionTraceObserver& ob,
-    const void* t) {
+inline ExecutionGraphObserver::ID getObjectID(
+    ExecutionGraphObserver& ob,
+    void* t) {
   auto iter = ob.object_id.find(t);
   if (iter == ob.object_id.end()) {
-    ExecutionTraceObserver::ID object_id = ob.getNewID();
+    ExecutionGraphObserver::ID object_id = ob.getNewID();
     ob.object_id[t] = object_id;
     return object_id;
   }
@@ -377,13 +374,13 @@ inline ExecutionTraceObserver::ID getObjectID(
 }
 
 inline std::string convertIValue(
-    ExecutionTraceObserver& ob,
+    ExecutionGraphObserver& ob,
     const c10::IValue& val,
     const size_t maxArrayLen = maxNumElements) {
   if (val.isTensor()) {
     const auto t = val.toTensor().unsafeGetTensorImpl();
-    ExecutionTraceObserver::ID tensor_id = getObjectID(ob, t);
-    ExecutionTraceObserver::ID storage_id = 0;
+    ExecutionGraphObserver::ID tensor_id = getObjectID(ob, t);
+    ExecutionGraphObserver::ID storage_id = 0;
     size_t offset = 0;
     size_t numel = 0;
     size_t itemsize = 0;
@@ -430,7 +427,7 @@ inline std::string convertIValue(
 }
 
 inline void appendValueInfo(
-    ExecutionTraceObserver& ob,
+    ExecutionGraphObserver& ob,
     const c10::IValue& val,
     std::vector<std::string>& values,
     std::vector<std::string>& types,
@@ -440,8 +437,8 @@ inline void appendValueInfo(
   shapes.push_back(getValueShape(val));
 }
 
-static void recordOperatorStart(
-    ExecutionTraceObserver& ob,
+void recordOperatorStart(
+    ExecutionGraphObserver& ob,
     FunctionCallContext& fc,
     const RecordFunction& fn) {
   auto tid = fn.threadId();
@@ -455,7 +452,7 @@ static void recordOperatorStart(
       ob.op_stack[tid].push(thread_node_id);
       writeJsonNode(
           ob.out,
-          "[pytorch|profiler|execution_trace|thread]",
+          "[pytorch|profiler|execution_graph|thread]",
           thread_node_id,
           0, // rf_id
           root_id,
@@ -502,13 +499,12 @@ static void recordOperatorStart(
     ob.op_stack[tid].push(fc.op_id);
 
   } catch (const std::exception& e) {
-    LOG(WARNING) << "Exception in execution trace observer: " << e.what();
+    LOG(WARNING) << "Exception in execution graph observer: " << e.what();
   }
 }
 
-static std::unique_ptr<ObserverContext> onFunctionEnter(
-    const RecordFunction& fn) {
-  using RunState = ExecutionTraceObserver::RunState;
+std::unique_ptr<ObserverContext> onFunctionEnter(const RecordFunction& fn) {
+  using RunState = ExecutionGraphObserver::RunState;
   auto ob = ObserverManager::get();
   if (ob != nullptr && ob->getState() == RunState::enabled) {
     // record op
@@ -546,8 +542,8 @@ inline std::string json_str_escape(const std::string& str) {
   return ostream.str();
 }
 
-static void onFunctionExit(const RecordFunction& fn, ObserverContext* ctx_ptr) {
-  using RunState = ExecutionTraceObserver::RunState;
+void onFunctionExit(const RecordFunction& fn, ObserverContext* ctx_ptr) {
+  using RunState = ExecutionGraphObserver::RunState;
   auto ob = ObserverManager::get();
   if (ob == nullptr || ctx_ptr == nullptr) {
     return;
@@ -616,23 +612,23 @@ static void onFunctionExit(const RecordFunction& fn, ObserverContext* ctx_ptr) {
           op_schema_str);
       ob->out << ",";
     } catch (const std::exception& e) {
-      LOG(WARNING) << "Exception in execution trace observer: [" << fc.name
+      LOG(WARNING) << "Exception in execution graph observer: [" << fc.name
                    << " (" << fc.op_id << ")] " << e.what();
     }
   }
 }
 
-// Add execution trace observer callback functions to the RecordFunction global
+// Add execution graph observer callback functions to the RecordFunction global
 // observers.
-bool addExecutionTraceObserver(const std::string& output_file_path) {
+bool addExecutionGraphObserver(const std::string& output_file_path) {
   // Check if the observer is already initialized.
   if (ObserverManager::get() == nullptr) {
-    ObserverManager::push(std::make_shared<ExecutionTraceObserver>());
+    ObserverManager::push(std::make_shared<ExecutionGraphObserver>());
     auto& ob = *ObserverManager::get();
     ob.pid = processId();
     // Set output
     ob.file_name = output_file_path;
-    if (!initExecutionTraceStart(ob)) {
+    if (!initExecutionGraphStart(ob)) {
       return false;
     }
 
@@ -642,60 +638,60 @@ bool addExecutionTraceObserver(const std::string& output_file_path) {
             .needsOutputs(true)
             .needsIds(true));
     // Default to disabled.
-    ob.setState(ExecutionTraceObserver::RunState::disabled);
+    ob.setState(ExecutionGraphObserver::RunState::disabled);
 
-    VLOG(1) << "PyTorch Execution Trace: added observer, output="
+    VLOG(1) << "Added PyTorch execution graph observer, output="
             << output_file_path;
   } else if (ObserverManager::get()->cb_handle != INVALID_CALLBACK_HANDLE) {
-    LOG(WARNING) << "Execution trace observer is already registered.";
+    LOG(WARNING) << "Execution graph observer is already registered.";
   }
   return true;
 }
 
-void removeExecutionTraceObserver() {
+void removeExecutionGraphObserver() {
   auto ob = ObserverManager::get();
   if (ob != nullptr) {
-    if (ob->getState() != ExecutionTraceObserver::RunState::disabled) {
-      disableExecutionTraceObserver();
+    if (ob->getState() != ExecutionGraphObserver::RunState::disabled) {
+      disableExecutionGraphObserver();
     }
 
     if (ob->cb_handle != INVALID_CALLBACK_HANDLE) {
-      finalizeExecutionTraceOutput(*ob);
+      finalizeExecutionGraphOutput(*ob);
       removeCallback(ob->cb_handle);
       ob->cb_handle = INVALID_CALLBACK_HANDLE;
-      // Release the current ET observer object and reset.
+      // Release the current EG observer object and reset.
       TORCH_INTERNAL_ASSERT(
           ObserverManager::pop() != nullptr,
           "Global state ptr cannot be null before resetting");
-      VLOG(1) << "PyTorch Execution Trace: removed observer";
+      VLOG(1) << "Removed PyTorch execution graph observer";
     } else {
-      LOG(WARNING) << "Execution trace observer was not registered.";
+      LOG(WARNING) << "Execution graph observer was not registered.";
     }
   } else {
-    LOG(WARNING) << "Execution trace observer was not initialized.";
+    LOG(WARNING) << "Execution graph observer was not initialized.";
   }
 }
 
-void enableExecutionTraceObserver() {
-  VLOG(1) << "enableExecutionTraceObserver() ";
+void enableExecutionGraphObserver() {
+  VLOG(1) << "enableExecutionGraphObserver() ";
   auto& ob = *ObserverManager::get();
   // Make sure we are not already enabled.
-  if (ob.getState() == ExecutionTraceObserver::RunState::enabled) {
+  if (ob.getState() == ExecutionGraphObserver::RunState::enabled) {
     LOG(WARNING)
-        << "Trying to enable Execution Trace Observer when it's already enabled.";
+        << "Trying to enable Execution Graph Observer when it's already enabled.";
   } else {
-    ob.setState(ExecutionTraceObserver::RunState::enabled);
+    ob.setState(ExecutionGraphObserver::RunState::enabled);
   }
 }
 
-void disableExecutionTraceObserver() {
-  VLOG(1) << "disableExecutionTraceObserver()";
+void disableExecutionGraphObserver() {
+  VLOG(1) << "disableExecutionGraphObserver()";
   auto& ob = *ObserverManager::get();
-  if (ob.getState() != ExecutionTraceObserver::RunState::disabled) {
-    ob.setState(ExecutionTraceObserver::RunState::disabled);
+  if (ob.getState() != ExecutionGraphObserver::RunState::disabled) {
+    ob.setState(ExecutionGraphObserver::RunState::disabled);
   } else {
     LOG(WARNING)
-        << "Trying to disable Execution Trace Observer when it's already disabled.";
+        << "Trying to disable Execution Graph Observer when it's already disabled.";
   }
 }
 } // namespace impl

@@ -36,10 +36,10 @@ static inline void cudaCheck(cudaError_t result, const char* file, int line) {
 #define TORCH_CUDA_CHECK(result) cudaCheck(result, __FILE__, __LINE__);
 
 struct CUDAMethods : public ProfilerStubs {
-  void record(int* device, ProfilerVoidEventStub* event, int64_t* cpu_ns)
+  void record(int* device, ProfilerEventStub* event, int64_t* cpu_ns)
       const override {
     if (device) {
-      TORCH_CUDA_CHECK(c10::cuda::GetDevice(device));
+      TORCH_CUDA_CHECK(cudaGetDevice(device));
     }
     // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
     CUevent_st* cuda_event_ptr;
@@ -54,11 +54,8 @@ struct CUDAMethods : public ProfilerStubs {
     TORCH_CUDA_CHECK(cudaEventRecord(cuda_event_ptr, stream));
   }
 
-  float elapsed(
-      const ProfilerVoidEventStub* event_,
-      const ProfilerVoidEventStub* event2_) const override {
-    auto event = (const ProfilerEventStub*)(event_);
-    auto event2 = (const ProfilerEventStub*)(event2_);
+  float elapsed(const ProfilerEventStub* event, const ProfilerEventStub* event2)
+      const override {
     TORCH_CUDA_CHECK(cudaEventSynchronize(event->get()));
     TORCH_CUDA_CHECK(cudaEventSynchronize(event2->get()));
     // NOLINTNEXTLINE(cppcoreguidelines-init-variables)

@@ -228,8 +228,9 @@ std::string stacksToStr(
   return "\"" + rc + "\"";
 }
 
-static std::vector<std::vector<int64_t>> flattenList(
-    const c10::List<c10::IValue>& list) {
+std::vector<std::vector<int64_t>> flattenList(
+    c10::List<c10::IValue> list,
+    std::string fn_name) {
   std::vector<std::vector<int64_t>> tensor_dims;
   for (const c10::IValue& input : list) {
     if (input.isTensor()) {
@@ -258,7 +259,7 @@ std::vector<std::vector<int64_t>> inputSizes(
     } else if (input.isList()) {
       std::vector<std::vector<int64_t>> tmp_sizes;
       if (flatten_list_enabled) {
-        tmp_sizes = flattenList(input.toList());
+        tmp_sizes = flattenList(input.toList(), std::string(fn.name()));
       }
       // Extend the current sizes array by the array returned from input sizes
       if (!tmp_sizes.empty()) {
@@ -309,7 +310,7 @@ std::string inputOpIdsToStr(
   return str;
 }
 
-std::string strListToStr(const std::vector<std::string>& types) {
+std::string dtypesToStr(const std::vector<std::string>& types) {
   if (types.empty()) {
     return "[]";
   } else {
@@ -318,26 +319,11 @@ std::string strListToStr(const std::vector<std::string>& types) {
         types.begin(),
         types.end(),
         std::ostream_iterator<std::string>(oss, ", "),
-        [](const std::string& s) -> std::string { return "\"" + s + "\""; });
+        [](std::string s) -> std::string { return "\"" + s + "\""; });
     auto rc = oss.str();
     rc.erase(rc.length() - 2); // remove last ", "
     return "[" + rc + "]";
   }
-}
-
-std::string ivalueListToStr(const std::vector<c10::IValue>& list) {
-  std::vector<std::string> concrete_str_inputs;
-  std::stringstream ss;
-  for (const auto& val : list) {
-    if (val.isNone()) {
-      concrete_str_inputs.emplace_back("");
-    } else {
-      ss.str("");
-      ss << val;
-      concrete_str_inputs.emplace_back(ss.str());
-    }
-  }
-  return strListToStr(concrete_str_inputs);
 }
 
 std::vector<std::string> inputTypes(const at::RecordFunction& fn) {
