@@ -134,6 +134,17 @@ force_fuse_int_mm_with_mul = False
 # Autotune will compare perf with normal cast->then->mm option
 use_mixed_mm = False
 
+# enable runtime numeric check for Optimus
+# floating point provides limited accuracy (about 7 decimal digits for single precision
+# floating point numbers,about 16 decimal digits for double precision floating point numbers)
+# according to PyTorch documentation.
+# https://pytorch.org/docs/stable/notes/numerical_accuracy.html#batched-computations-or-slice-computations
+runtime_numeric_check: Dict[str, Any] = {
+    "enable": False,
+    "precision": 1e-4,
+    "num_iterations": 1,
+}
+
 # for pattern torch.mm(a, b.to(dtype)) with cuda tensors, always use
 # torch._inductor.kernel.mm.tuned_mixed_mm's fused kernel.
 # Autotune will not compare with normal cast->then->mm option.
